@@ -51,6 +51,8 @@ CN_CASHFLOW_MAP = {
     "cash_from_investing": "投资活动产生的现金流量净额",
     "cash_from_financing": "筹资活动产生的现金流量净额",
 }
+# 港股：繁中公告（hk_quarterly）与英文年报（hk_annual）标签语言不同，
+# 分别维护两套 needle；build_schema 按 report_type 选用。
 HK_INCOME_MAP = {
     "revenue": "收入",
     "cost_of_revenue": "銷售成本",
@@ -58,7 +60,60 @@ HK_INCOME_MAP = {
     "rd_expense": "研發開支",
     "operating_income": "經營利潤",
     "net_income": "期間利潤",
-    "eps_diluted": "攤薄",
+    "net_income_noncontrolling": "非控股權益",
+    "eps_diluted": "每股盈利",
+}
+HK_INCOME_MAP_EN = {
+    "revenue": "Revenue",
+    "cost_of_revenue": "Cost of sales",
+    "gross_profit": "Gross profit",
+    "rd_expense": "Research and development expenses",
+    "operating_income": "Operating profit",
+    "net_income": "Profit for the year",
+    "eps_diluted": "Diluted",
+}
+HK_BALANCE_MAP = {
+    "cash_and_equivalents": "Cash and cash equivalents",
+    "total_assets": "Total assets",
+    "total_liabilities": "Total liabilities",
+    "total_equity": "Total equity",
+}
+HK_CF_MAP = {
+    "cash_from_operations": "Net cash generated from operating",
+    "cash_from_investing": "Net cash used in investing",
+    "cash_from_financing": "Net cash generated from/(used in) financing",
+    "ending_cash": "Cash and cash equivalents at the end of the year",
+}
+CN_INCOME_GENERAL_MAP = {
+    "revenue": "营业收入",
+    "cost_of_revenue": "营业成本",
+    "selling_expense": "销售费用",
+    "admin_expense": "管理费用",
+    "rd_expense": "研发费用",
+    "operating_income": "营业利润",
+    "net_income": "净利润",
+    "net_income_group": "归属于母公司所有者的净利润",
+    "eps_basic": "基本每股收益",
+}
+CN_BALANCE_GENERAL_MAP = {
+    "cash_and_equivalents": "货币资金",
+    "receivables": "应收账款",
+    "inventory": "存货",
+    "fixed_assets": "固定资产",
+    "intangible_assets": "无形资产",
+    "total_assets": "资产总计",
+    "total_equity": "股东权益合计",
+}
+CN_CF_GENERAL_MAP = {
+    "cash_from_operations": "经营活动产生的现金流量净额",
+    "cash_from_investing": "投资活动使用的现金流量净额",
+    "cash_from_financing": "筹资活动",
+    "capex": "购建固定资产、无形资产和其他长期资产支付的现金",
+    "ending_cash": "年末现金及现金等价物余额",
+}
+CN_BALANCE_GENERAL_POSTFIX = {
+    # 报表内小计行"流动资产合计/非流动资产合计"无独立字段需要，
+    # 但总行名是"资产总计"（A股通用），与银行版"资产总计"一致。
 }
 
 CN_KEY_RATIOS_MAP = {
@@ -112,13 +167,24 @@ def build_schema(extraction, report_type):
         schema.update(map_to_schema(extraction["key_ratios"]["items"], CN_KEY_RATIOS_MAP))
     elif report_type == "hk_quarterly":
         schema.update(map_to_schema(extraction["income_statement"]["items"], HK_INCOME_MAP))
+    elif report_type == "hk_annual":
+        schema.update(map_to_schema(extraction["income_statement"]["items"], HK_INCOME_MAP_EN))
+        schema.update(map_to_schema(extraction["balance_sheet"]["items"], HK_BALANCE_MAP))
+        schema.update(map_to_schema(extraction["cash_flow"]["items"], HK_CF_MAP))
+    elif report_type == "cn_a_share_general":
+        schema.update(map_to_schema(extraction["income_statement"]["items"], CN_INCOME_GENERAL_MAP))
+        schema.update(map_to_schema(extraction["balance_sheet"]["items"], CN_BALANCE_GENERAL_MAP))
+        schema.update(map_to_schema(extraction["cash_flow"]["items"], CN_CF_GENERAL_MAP))
+        _add_derived_general(schema)
     return schema
 
 
 def render_markdown_table(schema, report_type, company_label):
     """输出表格形式：字段 | 本期 | 上期 | 同比变化"""
     # 不同报告类型的期数排列约定不同,这里只取"本期 vs 可比上期"两个数
-    period_idx = {"us_10k": (0, 1), "us_10q": (0, 1), "cn_a_share_annual": (0, 1), "hk_quarterly": (0, 1)}
+    period_idx = {"us_10k": (0, 1), "us_10q": (0, 1), "cn_a_share_annual": (0, 1),
+                  "hk_quarterly": (0, 1), "hk_annual": (0, 1),
+                  "cn_a_share_general": (0, 1)}
     curr_i, prior_i = period_idx[report_type]
     lines = [f"### {company_label} 关键指标一览\n", "| 字段 | 本期 | 上期 | 同比 |", "|---|---|---|---|"]
     for field, data in schema.items():
@@ -132,11 +198,48 @@ def render_markdown_table(schema, report_type, company_label):
     return "\n".join(lines)
 
 
+def _add_derived_general(schema):
+    """A股通用型衍生指标：毛利率、净利率、现金流/净利润比、ROE 近似。
+    从已映射的原始字段计算，追加为 schema 中的 computed_* 字段。
+    """
+    def v(field, idx):
+        d = schema.get(field)
+        if not d or len(d["values"]) <= idx:
+            return None
+        return d["values"][idx]
+
+    rev0, rev1 = v("revenue", 0), v("revenue", 1)
+    cost0, cost1 = v("cost_of_revenue", 0), v("cost_of_revenue", 1)
+    ni0 = v("net_income", 0)
+    cfo0 = v("cash_from_operations", 0)
+    ta0, ta1 = v("total_assets", 0), v("total_assets", 1)
+    te0 = v("total_equity", 0)
+
+    def p(n, d):
+        return round(n / d * 100, 2) if d else None
+
+    if rev0 and cost0:
+        schema["gross_margin"] = {"label": "毛利率(计算)", "values": [p(rev0 - cost0, rev0),
+                                   p(rev1 - cost1, rev1) if rev1 and cost1 else None]}
+    if ni0 and rev0:
+        schema["net_margin"] = {"label": "净利率(计算)", "values": [p(ni0, rev0)]}
+    if cfo0 and ni0:
+        schema["cfo_to_ni"] = {"label": "经营现金流/净利润(计算)", "values": [round(cfo0 / ni0, 2)]}
+    if ni0 and ta0 and ta1:
+        schema["roa_approx"] = {"label": "总资产回报率近似(计算)",
+                                "values": [p(ni0, (ta0 + ta1) / 2)]}
+    if ni0 and te0:
+        schema["roe_approx"] = {"label": "ROE近似(计算)",
+                                "values": [p(ni0, te0)]}
+
+
 def render_narrative(schema, report_type, company_label):
     """输出文档形式：用计算出的同比数字写成叙述段落。
     原则：只陈述数字和方向，不做"好/坏"这类主观判断，不做没有数据支撑的推测。
     """
-    period_idx = {"us_10k": (0, 1), "us_10q": (0, 1), "cn_a_share_annual": (0, 1), "hk_quarterly": (0, 1)}
+    period_idx = {"us_10k": (0, 1), "us_10q": (0, 1), "cn_a_share_annual": (0, 1),
+                  "hk_quarterly": (0, 1), "hk_annual": (0, 1),
+                  "cn_a_share_general": (0, 1)}
     curr_i, prior_i = period_idx[report_type]
 
     def g(field):
@@ -146,6 +249,12 @@ def render_narrative(schema, report_type, company_label):
         curr, prior = d["values"][curr_i], d["values"][prior_i]
         return curr, prior, pct_change(curr, prior)
 
+    def _schema_val(s, field, idx):
+        d = s.get(field)
+        if not d or len(d["values"]) <= idx or d["values"][idx] is None:
+            return 0.0
+        return d["values"][idx]
+
     paras = [f"## {company_label} 财务概况\n"]
 
     if report_type in ("us_10k", "us_10q"):
@@ -154,7 +263,10 @@ def render_narrative(schema, report_type, company_label):
         gp, _, gp_chg = g("gross_profit")
         rd, _, rd_chg = g("rd_expense")
         cfo, _, cfo_chg = g("cash_from_operations")
-        capex, _, capex_chg = g("capex")
+        capex, capex_prior, capex_chg = g("capex")
+        if capex is not None and capex_prior:
+            # capex 按流出绝对值计同比（10-K 中为负值，A股中为正值）
+            capex_chg = pct_change(abs(capex), abs(capex_prior))
         paras.append(
             f"营收 {rev:,.0f} 百万美元，同比{'增长' if rev_chg and rev_chg>0 else '下降'} "
             f"{abs(rev_chg):.1f}%；净利润 {ni:,.0f} 百万美元，同比"
@@ -168,8 +280,8 @@ def render_narrative(schema, report_type, company_label):
         )
         paras.append(
             f"经营活动现金流净额 {cfo:,.0f} 百万美元，同比{cfo_chg:+.1f}%；"
-            f"资本开支 {abs(capex):,.0f} 百万美元，同比{'增加' if capex_chg and capex_chg<0 else '减少'}"
-            f"{abs(capex_chg):.1f}%（capex以负值记录，负值扩大代表投入增加）。"
+            f"资本开支 {abs(capex):,.0f} 百万美元（按流出绝对值计），"
+            f"同比{'增加' if capex_chg and capex_chg>0 else '减少'}{abs(capex_chg):.1f}%。"
         )
     elif report_type == "cn_a_share_annual":
         nii, _, nii_chg = g("net_interest_income")
@@ -198,6 +310,56 @@ def render_narrative(schema, report_type, company_label):
         paras.append(
             f"资本充足率 {car_curr:.2f}%（去年同期{car_prior:.2f}%）；"
             f"加权平均净资产收益率(ROE) {roe_curr:.2f}%（去年同期{roe_prior:.2f}%）。"
+        )
+    elif report_type == "hk_annual":
+        rev, _, rev_chg = g("revenue")
+        ni, _, ni_chg = g("net_income")
+        gp, _, gp_chg = g("gross_profit")
+        op, _, op_chg = g("operating_income")
+        ta, _, ta_chg = g("total_assets")
+        cfo, _, cfo_chg = g("cash_from_operations")
+        ec, _, _ = g("ending_cash")
+        paras.append(
+            f"收入 {rev:,.0f} 千元人民币，同比{'增长' if rev_chg and rev_chg>0 else '下降'} "
+            f"{abs(rev_chg):.1f}%；毛利 {gp:,.0f} 千元，同比{gp_chg:+.1f}%；"
+            f"经营利润 {op:,.0f} 千元，同比{op_chg:+.1f}%。"
+        )
+        paras.append(
+            f"年度利润 {ni:,.0f} 千元人民币，同比{'增长' if ni_chg and ni_chg>0 else '下降'} "
+            f"{abs(ni_chg):.1f}%；总资产 {ta:,.0f} 千元，同比{ta_chg:+.1f}%。"
+        )
+        paras.append(
+            f"经营活动现金流净额 {cfo:,.0f} 千元，同比{cfo_chg:+.1f}%；"
+            f"期末现金及现金等价物 {ec:,.0f} 千元。"
+        )
+    elif report_type == "cn_a_share_general":
+        rev, rev_prior, rev_chg = g("revenue")
+        cost, cost_prior, cost_chg = g("cost_of_revenue")
+        op_inc, _, op_chg = g("operating_income")
+        ni, _, ni_chg = g("net_income")
+        nig, _, nig_chg = g("net_income_group")
+        cfo, _, cfo_chg = g("cash_from_operations")
+        capex, capex_prior, capex_chg = g("capex")
+        if capex is not None and capex_prior:
+            capex_chg = pct_change(abs(capex), abs(capex_prior))
+        paras.append(
+            f"营业收入 {rev:,.0f} 千元，同比{'增长' if rev_chg and rev_chg>0 else '下降'} "
+            f"{abs(rev_chg):.1f}%；营业成本 {cost:,.0f} 千元，同比{cost_chg:+.1f}%，"
+            f"毛利率 {_schema_val(schema, 'gross_margin', 0):.1f}%"
+            f"（去年同期{_schema_val(schema, 'gross_margin', 1):.1f}%）。"
+        )
+        paras.append(
+            f"营业利润 {op_inc:,.0f} 千元，同比{op_chg:+.1f}%；净利润 {ni:,.0f} 千元，同比"
+            f"{'增长' if ni_chg and ni_chg>0 else '下降'} {abs(ni_chg):.1f}%；"
+            f"其中归母净利润 {nig:,.0f} 千元，同比{nig_chg:+.1f}%。"
+        )
+        paras.append(
+            f"经营活动现金流净额 {cfo:,.0f} 千元，同比{cfo_chg:+.1f}%，"
+            f"与净利润的比值为 {_schema_val(schema, 'cfo_to_ni', 0):.2f}（现金流/净利润，>1 说明利润有现金支撑）。"
+        )
+        paras.append(
+            f"购建固定资产等长期资产支付的现金 {abs(capex):,.0f} 千元（按流出绝对值计），"
+            f"同比{'增加' if capex_chg and capex_chg>0 else '减少'} {abs(capex_chg):.1f}%。"
         )
     return "\n\n".join(paras)
 
