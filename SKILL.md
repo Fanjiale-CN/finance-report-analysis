@@ -4,27 +4,34 @@ description: "Use this skill when the user provides a financial report (10-K, 10
 license: MIT
 ---
 
-# 财报提取与分析 Skill v0.2
+# 财报提取与分析 Skill v0.3 — Universal Cross-Market Mode
 
 ## 现状与边界（务必先读）
 
-这是一个**验证过但仍处于早期阶段**的 skill。已经在 8 份样本报告上做过逐项人工核对
+这是一个**全能入口 + 专属解析器 + 统一标准化 + 跨市场比较**的 skill。已经在 8 份样本报告上做过逐项人工核对
 （Apple 10-K、Apple 10-Q、小米集团 2026Q1 季报公告、小米集团 2025 年报、比亚迪 2025 年报、
 工商银行年报、工商银行一季报），核心三大报表 + 银行关键指标的提取准确率是可信的。但：
-- **分析深度目前很浅**：只做同比增速计算 + 方向性描述，不做估值、不做"好/坏"判断、
-不做跨公司对比。这是刻意的——先保证数字准，再逐步加分析深度。
+- **普通单报告分析**做同比增速和方向性描述；`scripts/compare.py` 新增跨报告比较，支持字段标准化、单位换算、汇率注入和口径警示，但不做估值、不做"好/坏"判断，也不会替代会计重述。
 - **依赖版本已升级**：代码从弃用的 `fitz` 导入改为 `import pymupdf`（PyMuPDF >= 1.24）。
    旧环境装了 PyMuPDF < 1.24 时请先 `pip install -r requirements.txt` 升级。
-- **换一家新公司/新报告格式，大概率需要人工调整** `REPORT_CONFIGS` 里的关键词和
-  `*_MAP` 里的字段映射。不要假设它能免配置处理任意报告。
-- **`hk_quarterly` 只覆盖利润表**：港股季报公告一般不含资产负债表/现金流量表，
-  不是 skill 能力缺失。若给完整中期报告（含三大简明报表），需要用 `hk_annual`（英文）
-  或等待繁中报表 needle 补全。
+- `scripts/universal.py` 提供 `report_type="auto"`：自动识别 A股、港股、美股以及中英文报告并路由。新公司的非标准格式仍可能需要补充关键词；自动识别置信度会随结果返回，低置信度必须人工确认。
+- `hk_quarterly` 只覆盖港股业绩公告中实际出现的利润表；完整中期/年度报告会自动路由到对应三大报表解析器。若报告同时存在多套语言或多套单位，统一层会保留口径警示。
 - **未知 report_type 会直接报错**（`ValueError`），不会静默跑下去；但已知类型
   遇到报告格式变体（科目名措辞不同）时某个字段会静默缺失——新增报告类型接入时
   务必逐项抽查一遍。
 
 ## 使用流程
+
+### 全能自动模式（推荐）
+
+```python
+from scripts.universal import extract_universal
+result = extract_universal("path/to/report.pdf", report_type="auto")
+print(result["detection"])  # 市场、语言、置信度、各类型得分
+schema = result["schema"]
+```
+
+### 单报告标准分析
 
 ```python
 # 1. 定位+提取+解析（每份报告先跑这一步，产出结构化数据）
@@ -38,6 +45,16 @@ schema = build_schema(result, "us_10k")
 table_md = render_markdown_table(schema, "us_10k", "公司名/报告期")
 doc_md = render_narrative(schema, "us_10k", "公司名/报告期")
 ```
+
+### 跨市场比较
+
+```python
+from scripts.compare import compare_reports, render_markdown
+result = compare_reports(["byd_annual.pdf", "xiaomi_annual.pdf"], fx_to_cny={"USD": 7.2, "HKD": 0.92})
+print(render_markdown(result))
+```
+
+比较层会自动识别每份报告，统一常见字段、原始单位和币种；人民币金额会转换为人民币百万元，美元/港币必须显式传入汇率，否则保留原币并标记不可比。
 
 ## 支持的报告类型 (`report_type`)
 
@@ -95,7 +112,8 @@ doc_md = render_narrative(schema, "us_10k", "公司名/报告期")
     （"Profit for the year""Cost of sales"）标签语言完全不同，`analyze.py` 里
     `hk_quarterly` 与 `hk_annual` 用两套 needle map，不能共用同一套。
 13. **资本开支符号差异**：10-K 里 capex 为负值（流出），A股报表为正值（列示为"支付的
-    现金"）。计算 capex 同比必须统一用绝对值，否则 97亿→157亿会被算成"减少 61%"。
+现金"）。计算 capex 同比必须统一用绝对值，否则 97亿→157亿会被算成"减少 61%"。
+14. **跨市场比较不是简单拼表**：必须同时处理币种、单位、财年/季度期间、合并范围和会计准则。`compare.py` 对缺失汇率不静默换算，并在输出中保留警示；统一字段缺失也会被保留而不是填零。
 
 ## 目录结构
 
@@ -106,9 +124,15 @@ finance-report-skill/
     statement_parser.py 通用"标签+N期数字"逐行解析器（parse_statement）
     extract.py           定位关键页 + 调用parser + 生成结构化JSON（run_extraction）
     analyze.py            schema映射 + 同比计算 + 表格/文档输出
+    universal.py           自动识别市场/语言/报告类型的全能入口
+    compare.py             跨市场字段、单位、币种标准化与比较输出
 ```
 
-## 下一步（未完成，按优先级）
+## 下一步（已完成项与后续迭代）
+
+已完成：A股、港股、美股自动识别与路由；常见三大报表字段统一；跨市场金额标准化与 compare 输出；缺汇率/低置信度/口径差异警示。
+
+后续迭代：
 
 1. 硬件类公司的分部收入/分部毛利率（嵌套结构，比三大报表复杂，还没设计）
 2. 银行的杜邦分解（ROE = ROA × 权益乘数）等更深的分析逻辑

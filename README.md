@@ -1,17 +1,12 @@
 # finance-report-skill
 
-从财报PDF（美股10-K/10-Q、A股年报/季报、港股季报）提取关键财务数据并生成表格/文档形式分析结论的
-Claude Code / Codex skill。支持英文、简体中文、繁体中文报告。
+从财报 PDF（美股 10-K/10-Q、A 股年报/季报、港股年报/季报）提取关键财务数据、统一口径并生成表格/文档形式分析结论的 Claude Code / Codex skill。支持英文、简体中文、繁体中文报告。
 
 ## 现状
 
-早期版本（v0.1），已在5份真实样本报告上逐项人工核对过提取准确率：
-- Apple 10-K（FY2025）、Apple 10-Q（FY26 Q3）
-- 小米集团季报（2026Q1，港股）
-- 中国工商银行年报（FY2025）、一季报（2026Q1，A股）
+当前版本为 **v0.3 Universal Cross-Market Mode**，已在 8 份真实样本报告上逐项人工核对，覆盖 Apple、美股季报、小米港股公告与年报、比亚迪 A 股年报及工商银行报告。
 
-分析深度目前刻意做得比较浅（同比增速+方向性描述），详见 [SKILL.md](./SKILL.md) 里的
-"现状与边界"和"已知的坑"两节——踩过的问题都记录在那，方便贡献者不重复踩。
+输入任意 A 股、港股或美股财报时，可使用自动模式识别市场、语言和报告类型；跨报告比较时，`compare.py` 会统一常见字段、原始单位和币种。缺失汇率、低识别置信度及会计口径差异会显式提示，不会静默混算。分析仍然坚持数字和方向优先，不做估值或主观的“好/坏”判断。
 
 ## 快速开始
 
@@ -20,17 +15,32 @@ pip install -r requirements.txt
 ```
 
 ```python
-from scripts.extract import run_extraction
-from scripts.analyze import build_schema, render_markdown_table, render_narrative
+from scripts.universal import extract_universal
 
-result = run_extraction("path/to/report.pdf", report_type="us_10k")
-schema = build_schema(result, "us_10k")
-print(render_markdown_table(schema, "us_10k", "公司名/报告期"))
-print(render_narrative(schema, "us_10k", "公司名/报告期"))
+result = extract_universal("path/to/report.pdf", report_type="auto")
+print(result["detection"])  # 市场、语言、置信度和各类型得分
+print(result["schema"])
 ```
 
-`report_type` 目前支持 `us_10k` / `us_10q` / `cn_a_share_annual` / `hk_quarterly`，
-详见 [SKILL.md](./SKILL.md)。
+跨市场比较：
+
+```python
+from scripts.compare import compare_reports, render_markdown
+
+result = compare_reports(
+    ["a_share_report.pdf", "hk_report.pdf", "us_report.pdf"],
+    fx_to_cny={"USD": 7.2, "HKD": 0.92},
+)
+print(render_markdown(result))
+```
+
+命令行形式：
+
+```bash
+PYTHONPATH=scripts python3 scripts/compare.py a_share_report.pdf hk_report.pdf us_report.pdf --fx '{"USD":7.2,"HKD":0.92}'
+```
+
+`report_type` 仍支持显式指定 `us_10k` / `us_10q` / `cn_a_share_annual` / `cn_a_share_general` / `hk_quarterly` / `hk_annual`；推荐普通使用场景采用 `auto`。
 
 ## 示例输出
 
