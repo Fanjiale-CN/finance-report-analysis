@@ -154,27 +154,35 @@ def pct_change(curr, prior):
     return round((curr - prior) / abs(prior) * 100, 2)
 
 
+def _items_or_empty(extraction, statement_name):
+    payload = extraction.get(statement_name, {})
+    if not isinstance(payload, dict):
+        return []
+    items = payload.get("items", [])
+    return items if isinstance(items, list) else []
+
+
 def build_schema(extraction, report_type):
     schema = {}
     if report_type in ("us_10k", "us_10q"):
-        schema.update(map_to_schema(extraction["income_statement"]["items"], US_INCOME_MAP))
-        schema.update(map_to_schema(extraction["balance_sheet"]["items"], US_BALANCE_MAP))
-        schema.update(map_to_schema(extraction["cash_flow"]["items"], US_CASHFLOW_MAP))
+        schema.update(map_to_schema(_items_or_empty(extraction, "income_statement"), US_INCOME_MAP))
+        schema.update(map_to_schema(_items_or_empty(extraction, "balance_sheet"), US_BALANCE_MAP))
+        schema.update(map_to_schema(_items_or_empty(extraction, "cash_flow"), US_CASHFLOW_MAP))
     elif report_type == "cn_a_share_annual":
-        schema.update(map_to_schema(extraction["income_statement"]["items"], CN_INCOME_MAP))
-        schema.update(map_to_schema(extraction["balance_sheet"]["items"], CN_BALANCE_MAP))
-        schema.update(map_to_schema(extraction["cash_flow"]["items"], CN_CASHFLOW_MAP))
-        schema.update(map_to_schema(extraction["key_ratios"]["items"], CN_KEY_RATIOS_MAP))
+        schema.update(map_to_schema(_items_or_empty(extraction, "income_statement"), CN_INCOME_MAP))
+        schema.update(map_to_schema(_items_or_empty(extraction, "balance_sheet"), CN_BALANCE_MAP))
+        schema.update(map_to_schema(_items_or_empty(extraction, "cash_flow"), CN_CASHFLOW_MAP))
+        schema.update(map_to_schema(_items_or_empty(extraction, "key_ratios"), CN_KEY_RATIOS_MAP))
     elif report_type == "hk_quarterly":
-        schema.update(map_to_schema(extraction["income_statement"]["items"], HK_INCOME_MAP))
+        schema.update(map_to_schema(_items_or_empty(extraction, "income_statement"), HK_INCOME_MAP))
     elif report_type == "hk_annual":
-        schema.update(map_to_schema(extraction["income_statement"]["items"], HK_INCOME_MAP_EN))
-        schema.update(map_to_schema(extraction["balance_sheet"]["items"], HK_BALANCE_MAP))
-        schema.update(map_to_schema(extraction["cash_flow"]["items"], HK_CF_MAP))
+        schema.update(map_to_schema(_items_or_empty(extraction, "income_statement"), HK_INCOME_MAP_EN))
+        schema.update(map_to_schema(_items_or_empty(extraction, "balance_sheet"), HK_BALANCE_MAP))
+        schema.update(map_to_schema(_items_or_empty(extraction, "cash_flow"), HK_CF_MAP))
     elif report_type == "cn_a_share_general":
-        schema.update(map_to_schema(extraction["income_statement"]["items"], CN_INCOME_GENERAL_MAP))
-        schema.update(map_to_schema(extraction["balance_sheet"]["items"], CN_BALANCE_GENERAL_MAP))
-        schema.update(map_to_schema(extraction["cash_flow"]["items"], CN_CF_GENERAL_MAP))
+        schema.update(map_to_schema(_items_or_empty(extraction, "income_statement"), CN_INCOME_GENERAL_MAP))
+        schema.update(map_to_schema(_items_or_empty(extraction, "balance_sheet"), CN_BALANCE_GENERAL_MAP))
+        schema.update(map_to_schema(_items_or_empty(extraction, "cash_flow"), CN_CF_GENERAL_MAP))
         _add_derived_general(schema)
     return schema
 

@@ -4,17 +4,16 @@ description: "Use this skill when the user provides a financial report (10-K, 10
 license: MIT
 ---
 
-# 财报提取与分析 Skill v0.3 — Universal Cross-Market Mode
+# 财报提取与分析 Skill v0.4 — Universal Cross-Market Mode
 
 ## 现状与边界（务必先读）
 
-这是一个**全能入口 + 专属解析器 + 统一标准化 + 跨市场比较**的 skill。已经在 8 份样本报告上做过逐项人工核对
-（Apple 10-K、Apple 10-Q、小米集团 2026Q1 季报公告、小米集团 2025 年报、比亚迪 2025 年报、
-工商银行年报、工商银行一季报），核心三大报表 + 银行关键指标的提取准确率是可信的。但：
+这是一个**全能入口 + 专属解析器 + 统一标准化 + 跨市场比较**的 skill。当前已在 A 股、港股和美股真实报告上完成回归；统一入口返回 `FinancialReport` 契约、完整性摘要和结构化问题，而不是让缺失数据以裸 `KeyError` 失败。仍需对新公司、新版式进行抽查，但已具备跨市场通用入口。
 - **普通单报告分析**做同比增速和方向性描述；`scripts/compare.py` 新增跨报告比较，支持字段标准化、单位换算、汇率注入和口径警示，但不做估值、不做"好/坏"判断，也不会替代会计重述。
 - **依赖版本已升级**：代码从弃用的 `fitz` 导入改为 `import pymupdf`（PyMuPDF >= 1.24）。
    旧环境装了 PyMuPDF < 1.24 时请先 `pip install -r requirements.txt` 升级。
-- `scripts/universal.py` 提供 `report_type="auto"`：自动识别 A股、港股、美股以及中英文报告并路由。新公司的非标准格式仍可能需要补充关键词；自动识别置信度会随结果返回，低置信度必须人工确认。
+- `scripts/universal.py` 提供 `report_type="auto"`：自动识别 A股、港股、美股以及中英文报告并路由。结果统一为 `FinancialReport`，包含 `statements`、`completeness`、`issues` 和原始 `extraction`；新公司的非标准格式仍可能需要补充关键词，低置信度必须人工确认。
+- `scripts/table_reconstruction.py` 使用 PyMuPDF `words` 坐标按行聚合，作为复杂版式、标题与数据跨页或阅读顺序异常时的 fallback；它不会覆盖已通过回归的传统文本解析结果。
 - `hk_quarterly` 只覆盖港股业绩公告中实际出现的利润表；完整中期/年度报告会自动路由到对应三大报表解析器。若报告同时存在多套语言或多套单位，统一层会保留口径警示。
 - **未知 report_type 会直接报错**（`ValueError`），不会静默跑下去；但已知类型
   遇到报告格式变体（科目名措辞不同）时某个字段会静默缺失——新增报告类型接入时
@@ -125,12 +124,13 @@ finance-report-skill/
     extract.py           定位关键页 + 调用parser + 生成结构化JSON（run_extraction）
     analyze.py            schema映射 + 同比计算 + 表格/文档输出
     universal.py           自动识别市场/语言/报告类型的全能入口
-    compare.py             跨市场字段、单位、币种标准化与比较输出
+    compare.py             跨市场字段、单位、币种、准则警示与比较输出
+    table_reconstruction.py 基于 words 坐标的表格行重建 fallback
 ```
 
 ## 下一步（已完成项与后续迭代）
 
-已完成：A股、港股、美股自动识别与路由；常见三大报表字段统一；跨市场金额标准化与 compare 输出；缺汇率/低置信度/口径差异警示。
+已完成：A股、港股、美股自动识别与路由；中国电信、HKEX、Disney、小米、比亚迪五份真实样本三大报表回归通过；复杂标题大小写、日期顺序、中文报表简称和跨页表格兼容；统一 `FinancialReport` 契约；跨市场金额标准化、会计准则识别与缺汇率/低置信度/不完整报告警示。
 
 后续迭代：
 

@@ -18,7 +18,7 @@ def find_pages(doc, keywords):
     for i, page in enumerate(doc):
         text = page.get_text()
         for kw in keywords:
-            if kw in text:
+            if kw in text or kw.lower() in text.lower():
                 hits.setdefault(kw, []).append(i + 1)
                 continue
             # 跨行匹配：关键词按空格拆分后，相邻行拼起来包含关键词
@@ -108,16 +108,28 @@ def extract_statement(doc, page_nos, n_periods, strip_before=None, strip_after=N
                 dropped.append(it)
                 continue
         clean_items.append(it)
-    return {"items": clean_items, "dropped_noise": dropped}
+    # 复杂 PDF（SEC/HKEX 或字体布局异常）可能让阅读顺序解析出空行。
+    # 此时启用坐标重建；若仍无结果，保留原始空结果并由统一契约标记 incomplete。
+    if len(clean_items) < 3:
+        try:
+            from table_reconstruction import reconstruct_pages
+            rebuilt = reconstruct_pages([doc[p - 1] for p in page_nos if 1 <= p <= len(doc)], n_periods)
+            if len(rebuilt) > len(clean_items):
+                clean_items = rebuilt
+            if clean_items:
+                return {"items": clean_items, "dropped_noise": dropped, "parser": "coordinate_fallback"}
+        except Exception as exc:
+            dropped.append({"label": "coordinate_reconstruction_error", "values": [], "footnote": str(exc)})
+    return {"items": clean_items, "dropped_noise": dropped, "parser": "text_line"}
 
 
 # ---- 每种报告类型的定位配置 ----
 # n_periods: 该报表每行数据的期数（跟随报表版式，需要人工确认一次）
 REPORT_CONFIGS = {
     "us_10k": {
-        "income_statement": {"keyword": "CONSOLIDATED STATEMENTS OF OPERATIONS", "n_periods": 3},
-        "balance_sheet": {"keyword": "CONSOLIDATED BALANCE SHEETS", "n_periods": 2},
-        "cash_flow": {"keyword": "CONSOLIDATED STATEMENTS OF CASH FLOWS", "n_periods": 3},
+        "income_statement": {"keyword": ["CONSOLIDATED STATEMENTS OF OPERATIONS", "CONSOLIDATED STATEMENTS OF INCOME"], "n_periods": 3, "span_pages": 2, "strip_before": "CONSOLIDATED STATEMENTS OF INCOME"},
+        "balance_sheet": {"keyword": ["CONSOLIDATED BALANCE SHEETS", "CONSOLIDATED BALANCE SHEET"], "n_periods": 2, "span_pages": 3},
+        "cash_flow": {"keyword": ["CONSOLIDATED STATEMENTS OF CASH FLOWS", "CONSOLIDATED STATEMENT OF CASH FLOWS"], "n_periods": 3, "span_pages": 4},
     },
     "us_10q": {
         "income_statement": {"keyword": "CONDENSED CONSOLIDATED STATEMENTS OF OPERATIONS", "n_periods": 4},
@@ -138,16 +150,19 @@ REPORT_CONFIGS = {
         # 港股年报英文报表标题常跨行（"CONSOLIDATED INCOME\nSTATEMENT"），
         # 用 all_keywords 要求 "INCOME STATEMENT" 与年度锚点同页出现才命中。
         "income_statement": {
-            "all_keywords": ["INCOME STATEMENT", "For the year ended December 31"],
+            "all_keyword_sets": [
+                ["INCOME STATEMENT", "For the year ended 31 December"],
+                ["INCOME STATEMENT", "For the year ended December 31"],
+            ],
             "n_periods": 2, "strip_after": "The notes",
         },
         "balance_sheet": {
-            "keyword": "CONSOLIDATED BALANCE SHEET", "n_periods": 2,
+            "keyword": ["CONSOLIDATED BALANCE SHEET", "CONSOLIDATED STATEMENT OF FINANCIAL POSITION"], "n_periods": 2,
             "span_pages": 2, "strip_before": "Assets",
             "strip_after": "The notes",
         },
         "cash_flow": {
-            "keyword": "CONSOLIDATED STATEMENT OF CASH FLOWS", "n_periods": 2,
+            "keyword": ["CONSOLIDATED STATEMENT OF CASH FLOWS", "CONSOLIDATED STATEMENTS OF CASH FLOWS"], "n_periods": 2,
             "span_pages": 2,
             "strip_before": "Cash flows from operating",
             "strip_after": "The notes",
@@ -155,18 +170,18 @@ REPORT_CONFIGS = {
     },
     "cn_a_share_general": {
         "income_statement": {
-            "keyword": "合并利润表", "n_periods": 2,
-            "strip_before": "合并利润表",
+            "keyword": ["合并利润表", "利润表"], "n_periods": 2,
+            "strip_before": "利润表",
             "strip_after": "后附财务报表附注",
         },
         "balance_sheet": {
-            "keyword": "合并资产负债表", "n_periods": 2, "span_pages": 3,
-            "strip_before": "合并资产负债表",
+            "keyword": ["合并资产负债表", "资产负债表"], "n_periods": 2, "span_pages": 3,
+            "strip_before": "资产负债表",
             "strip_after": "后附财务报表附注",
         },
         "cash_flow": {
-            "keyword": "合并现金流量表", "n_periods": 2, "span_pages": 2,
-            "strip_before": "合并现金流量表",
+            "keyword": ["合并现金流量表", "现金流量表"], "n_periods": 2, "span_pages": 2,
+            "strip_before": "现金流量表",
             "strip_after": "后附财务报表附注",
         },
     },
@@ -182,7 +197,7 @@ def _numeric_density(doc, page_no):
 
 def _keyword_in_text(kw, text):
     """检查关键词是否在文本中（含跨行标题匹配）。"""
-    if kw in text:
+    if kw in text or kw.lower() in text.lower():
         return True
     if " " in kw:
         lines = [l.strip() for l in text.splitlines() if l.strip()]
@@ -216,16 +231,22 @@ def run_extraction(pdf_path, report_type):
     config = REPORT_CONFIGS[report_type]
     result = {}
     for stmt_name, cfg in config.items():
-        if "all_keywords" in cfg:
-            start_page = _find_page_by_all_keywords(doc, cfg["all_keywords"])
+        if "all_keywords" in cfg or "all_keyword_sets" in cfg:
+            keyword_sets = cfg.get("all_keyword_sets", [cfg.get("all_keywords", [])])
+            start_page = None
+            for keyword_set in keyword_sets:
+                start_page = _find_page_by_all_keywords(doc, keyword_set)
+                if start_page is not None:
+                    break
             if start_page is None:
-                result[stmt_name] = {"error": f"未找到关键词组合: {cfg['all_keywords']}"}
+                result[stmt_name] = {"error": f"未找到关键词组合: {keyword_sets}"}
                 continue
         else:
-            hits = find_pages(doc, [cfg["keyword"]])
-            pages = hits.get(cfg["keyword"], [])
+            keywords = cfg["keyword"] if isinstance(cfg["keyword"], list) else [cfg["keyword"]]
+            hits = find_pages(doc, keywords)
+            pages = [p for kw in keywords for p in hits.get(kw, [])]
             if not pages:
-                result[stmt_name] = {"error": f"未找到关键词: {cfg['keyword']}"}
+                result[stmt_name] = {"error": f"未找到关键词: {keywords}"}
                 continue
             # 多个命中页时（目录引用、附注中提及、正文本身可能横跨多页），
             # 用数字密度筛出"看起来像正文"的页，取其中最靠前的一页作为起点
@@ -235,11 +256,15 @@ def run_extraction(pdf_path, report_type):
             max_density = max(densities.values())
             threshold = max(max_density * 0.5, 10)
             candidates = [p for p in pages if densities[p] >= threshold]
-            start_page = min(candidates)
+            # 某些矢量/扫描 PDF 的文本行无法被 VALUE_RE 识别，数字密度会全部为 0。
+            # 此时仍应返回最早命中页，让坐标/文本 fallback 有机会继续解析，而不是
+            # 在 min([]) 处抛出裸异常。
+            start_page = min(candidates or pages)
         span = cfg.get("span_pages", 1)
         page_range = list(range(start_page, start_page + span))
         result[stmt_name] = extract_statement(
             doc, page_range, cfg["n_periods"],
+            strip_before=cfg.get("strip_before"),
             strip_after=cfg.get("strip_after"),
         )
     doc.close()
